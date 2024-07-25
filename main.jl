@@ -335,9 +335,8 @@ for q in 1:4
 
     savefig(string(outdir,"recoveries_mh.png"))
 
-    # using DynamicHMC
+    using DynamicHMC
 
-    # # ode_advi = sample(bayes_sir_tvp(Y, K), HMC(0.0025, 20), MCMCThreads(), 1000, 10, discard_initial = 1000, thinning = 1)
 
     ode_advi_2 = sample(bayes_sir_tvp(Y, K), Turing.NUTS(1000, 0.65), MCMCThreads(), 100, 6, discard_initial = 2000, thinning = 100)
 
