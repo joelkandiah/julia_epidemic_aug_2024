@@ -32,7 +32,7 @@ for q in 1:4
     
     # Initialise parameters
     # Length of outbreak
-    tmax = 120.0
+    tmax = 80.0
     tspan = (0.0, tmax)
     obstimes = 1.0:1.0:tmax
 
@@ -55,7 +55,7 @@ for q in 1:4
     βσ² = 0.15
 
     # Create store for the β values
-    true_beta = repeat([NaN], 4)
+    true_beta = repeat([NaN], 3)
     
     # Draw log(β₀) from Normal(log(β₀μ), β₀σ²)
     true_beta[1] = exp(rand(Normal(log(β₀μ), β₀σ²)))
@@ -218,8 +218,8 @@ for q in 1:4
                 maxiters = 1e6,
                 d_discontinuities = knots[2:end-1],
                 tstops = knots[2:end-1],
-                abstol = 1e-8,
-                reltol = 1e-5)
+                abstol = 1e-7,
+                reltol = 1e-4)
 
         # Automatically reject the proposal values if the solver returns an error
         if any(sol.retcode != :Success)
@@ -250,29 +250,32 @@ for q in 1:4
 
 
 
-
+    # Produce inference using MCMC
     using AdvancedMH
 
-    chn = sample(bayes_sir_tvp(Y, K),
+    @time chn = sample(bayes_sir_tvp(Y, K),
         MH(:log_I₀ => AdvancedMH.RandomWalkProposal(Normal(0,6e-2)),
         :log_β₀  => AdvancedMH.RandomWalkProposal(Normal(0,3e-3)),
-           :log_β => AdvancedMH.RandomWalkProposal(product_distribution(Normal.(repeat([0],K-2), repeat([3e-3],K-2))))
-        # :log_β => AdvancedMH.RandomWalkProposal(Normal(0, 3e-3))
+        #    :log_β => AdvancedMH.RandomWalkProposal(product_distribution(Normal.(repeat([0],K-2), repeat([3e-3],K-2))))
+        :log_β => AdvancedMH.RandomWalkProposal(Normal(0, 3e-3))
         ),
-        MCMCThreads(), 100, 6, discard_initial = 150_000, thinning = 1000, save_state = true)
+        MCMCThreads(), 100, 6, discard_initial = 100_000, thinning = 1000, save_state = true)
 
     plot(chn)
     savefig(string(outdir,"chn_mh.png"))
 
+   # Transform the beta parameters 
     betas = Array(chn[chn.name_map.parameters[1:end]])
     beta_idx = [collect(2:K); K]
 
     betas[:,2:end] = exp.(cumsum(betas[:,2:end], dims = 2))
+
+    # Estimate credible interval for betas
     beta_μ = [quantile(betas[:,i], 0.5) for i in beta_idx]
     betas_lci = [quantile(betas[:,i], 0.025) for i in beta_idx]
     betas_uci = [quantile(betas[:,i], 0.975) for i in beta_idx]
 
-
+    # Plot betas
     plot(obstimes,
         betat(beta_μ, obstimes),
         xlabel = "Time",
@@ -294,7 +297,7 @@ for q in 1:4
 
     savefig(string(outdir,"mh_betas.png"))
 
-
+    # Generate confidence intervals for the number of infectious individuals
     function generate_confint_infec(chn, Y, K)
         chnm_res = generated_quantities(bayes_sir_tvp(Y, K), chn);
 
@@ -305,6 +308,7 @@ for q in 1:4
         return (; lowci_inf, medci_inf, uppci_inf)
     end
 
+    # Generate confidence intervals for the number of recovered individuals
     function generate_confint_recov(chn, Y, K)
         chnm_res = generated_quantities(bayes_sir_tvp(Y, K), chn);
 
@@ -317,6 +321,7 @@ for q in 1:4
 
 
 
+    # Plot estimates of the infectious and recovered compartments
     confint = generate_confint_infec(chn,Y,K)
 
     I_dat = Array(sol_ode(obstimes))[2,:] # Cumulative cases
@@ -335,19 +340,19 @@ for q in 1:4
 
     savefig(string(outdir,"recoveries_mh.png"))
 
+    # Perform inference via NUTS
     using DynamicHMC
 
 
-    ode_advi_2 = sample(bayes_sir_tvp(Y, K), Turing.NUTS(1000, 0.65), MCMCThreads(), 100, 6, discard_initial = 2000, thinning = 100)
+    @time ode_nuts_2 = sample(bayes_sir_tvp(Y, K), Turing.NUTS(1000, 0.65), MCMCThreads(), 100, 6, discard_initial = 200, thinning = 10)
 
-    plot(ode_advi_2)
+    plot(ode_nuts_2)
     savefig(string(outdir,"chn_nuts.png"))
 
-    betas = Array(ode_advi_2[ode_advi_2.name_map.parameters[1:end]])
+    betas = Array(ode_nuts_2[ode_nuts_2.name_map.parameters[1:end]])
     beta_idx = [collect(2:K); K]
 
-    betas[:,2] = log.(inverse(Bijectors.Logit(0,1)).(betas[:,2]))]    
-    betas[:,2:end] =exp.(cumsum(betas[:,2:end], dims = 2))
+    betas[:,2:end] = exp.(cumsum(betas[:,2:end], dims = 2))
     beta_μ = [quantile(betas[:,i], 0.5) for i in beta_idx]
     betas_lci = [quantile(betas[:,i], 0.025) for i in beta_idx]
     betas_uci = [quantile(betas[:,i], 0.975) for i in beta_idx]
@@ -374,26 +379,25 @@ for q in 1:4
     savefig(string(outdir,"nuts_betas.png"))
 
 
-    confint = generate_confint_infec(ode_advi_2,Y,K)
+    confint = generate_confint_infec(ode_nuts_2,Y,K)
     plot(confint.medci_inf, ribbon = (confint.medci_inf - confint.lowci_inf, confint.uppci_inf - confint.medci_inf) , legend = false)
     plot!(I_dat, linesize = 3)
 
     savefig(string(outdir,"infections_nuts.png"))
 
-    confint = generate_confint_recov(ode_advi_2,Y,K)
+    confint = generate_confint_recov(ode_nuts_2,Y,K)
 
     plot(confint.medci_inf, ribbon = (confint.medci_inf - confint.lowci_inf, confint.uppci_inf - confint.medci_inf)  , legend = false)
     plot!(R_dat, linesize = 3)
 
     savefig(string(outdir,"recoveries_nuts.png"))
 
-    # advi = ADVI(100, 10000) # 10 samples, 1000 gradient iterations
+    # advi = ADVI(10, 1000) # 10 samples, 1000 gradient iterations
     # @time ode_advi_samp = vi(bayes_sir_tvp(Y, K), advi);
 
     # ode_advi_postsamples = rand(ode_advi_samp, 1000);
     # beta_idx = [collect(2:K);K]
-    # ode_advi_postsamples[2,:] = log.(exp.(ode_advi_postsamples[2,:]))
-    # ode_advi_postsamples[2:end,:] =exp.(cumsum(ode_advi_postsamples[2:end,:], dims = 1))
+    # ode_advi_postsamples[2:end,:] = exp.(cumsum(ode_advi_postsamples[2:end,:], dims = 1))
     # betas = [quantile(ode_advi_postsamples[i,:],0.5) for i in beta_idx]
     # betas_lci = [quantile(ode_advi_postsamples[i,:], 0.025) for i in beta_idx]
     # betas_uci = [quantile(ode_advi_postsamples[i,:], 0.975) for i in beta_idx]
